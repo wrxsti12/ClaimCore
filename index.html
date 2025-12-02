@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>AI 自動報帳系統</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="chat-page">
+        <!-- Hero -->
+        <header class="hero-header">
+            <h1>AI 自動報帳系統</h1>
+            <p>上傳發票 PDF，AI 自動完成報帳流程</p>
+        </header>
+
+        <!-- Chat Card -->
+        <main class="chat-card">
+            <!-- 上傳區 -->
+            <section class="chat-upload-row">
+                <label class="file-label">
+                    <span>選擇 PDF</span>
+                    <input type="file" id="fileInput" accept=".pdf,.jpg,.jpeg,.png">
+                </label>
+                <button id="uploadBtn" class="primary-btn">解析發票</button>
+                <button id="autoReimbursementBtn" class="primary-btn" style="background: linear-gradient(135deg, #38d996, #28a745);" disabled>🤖 自動報帳</button>
+            </section>
+
+            <div id="statusMessage" class="status-bar"></div>
+
+            <!-- 聊天訊息區 -->
+            <section id="chatMessages" class="chat-messages">
+                <div class="message bot">
+                    <div class="message-bubble">
+                        👋 你好！請上傳發票 PDF，我會幫你解析並自動完成報帳流程。
+                        <br><br>
+                        📋 支援格式：PDF、JPG、PNG
+                    </div>
+                </div>
+            </section>
+
+            <!-- 輸入區 -->
+            <section class="chat-input-row">
+                <input id="userInput" type="text" placeholder="有問題可以問我...">
+                <button id="sendBtn" class="primary-btn">發送</button>
+            </section>
+        </main>
+
+        <!-- 摘要卡片 -->
+        <section class="card-container summary-card" id="summaryCard" style="display: none;">
+            <h2>📄 發票摘要</h2>
+            <table id="summaryTable">
+                <tbody>
+                    <tr><th>發票號碼</th><td id="sumInvoiceNo"></td></tr>
+                    <tr><th>日期</th><td id="sumDate"></td></tr>
+                    <tr><th>供應商</th><td id="sumSeller"></td></tr>
+                    <tr><th>金額</th><td id="sumTotal"></td></tr>
+                    <tr><th>幣別</th><td id="sumCurrency"></td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Browser Use 結果卡片 -->
+        <section class="card-container summary-card" id="browserResultCard" style="display: none;">
+            <h2>🤖 自動報帳結果</h2>
+            <div id="browserResultContent"></div>
+        </section>
+    </div>
+
+    <script>
+        // DOM 元素
+        const uploadBtn = document.getElementById('uploadBtn');
+        const autoReimbursementBtn = document.getElementById('autoReimbursementBtn');
+        const fileInput = document.getElementById('fileInput');
+        const statusMessage = document.getElementById('statusMessage');
+        const chatMessages = document.getElementById('chatMessages');
+        const userInput = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const summaryCard = document.getElementById('summaryCard');
+        const browserResultCard = document.getElementById('browserResultCard');
+        const browserResultContent = document.getElementById('browserResultContent');
+
+        // 摘要欄位
+        const sumInvoiceNo = document.getElementById('sumInvoiceNo');
+        const sumDate = document.getElementById('sumDate');
+        const sumSeller = document.getElementById('sumSeller');
+        const sumTotal = document.getElementById('sumTotal');
+        const sumCurrency = document.getElementById('sumCurrency');
+
+        let currentInvoicePath = null; // 儲存目前上傳的發票 GCS 路徑
+
+        // 設定狀態訊息
+        function setStatus(msg, ok = true) {
+            statusMessage.textContent = msg;
+            statusMessage.className = `status-bar ${ok ? 'ok' : 'err'}`;
+        }
+
+        // 新增聊天訊息
+        function appendMessage(role, text) {
+            const wrapper = document.createElement('div');
+            wrapper.className = `message ${role === 'user' ? 'user' : 'bot'}`;
+            const bubble = document.createElement('div');
+            bubble.className = 'message-bubble';
+            bubble.innerHTML = text; // 使用 innerHTML 支援換行
+            wrapper.appendChild(bubble);
+            chatMessages.appendChild(wrapper);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        // 解析發票（原有功能）
+        uploadBtn.addEventListener('click', async () => {
+            const file = fileInput.files[0];
+            if (!file) {
+                setStatus('請選擇 PDF 檔案', false);
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', file);
+            uploadBtn.disabled = true;
+            setStatus('上傳中...');
+            appendMessage('user', `📎 ${file.name}`);
+
+            try {
+                // 假設你原本的後端是 http://127.0.0.1:8000/parse-invoice
+                // 改成你實際的後端 URL
+                const resp = await fetch('https://claimcore-384115959752.asia-east1.run.app', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await resp.json();
+
+                if (!resp.ok || !data.success) {
+                    const errMsg = data.error || `HTTP ${resp.status}`;
+                    setStatus(errMsg, false);
+                    appendMessage('bot', `❌ ${errMsg}`);
+                    return;
+                }
+
+                const parsed = data.parsed;
+                setStatus('✅ 解析成功');
+                appendMessage('bot', `✅ 發票已解析完成！`);
+
+                // 填充摘要表格
+                sumInvoiceNo.textContent = parsed.invoiceNo || '-';
+                sumDate.textContent = parsed.date || '-';
+                sumSeller.textContent = parsed.sellerName || '-';
+                sumTotal.textContent = parsed.totalAmount !== null ? `${parsed.totalAmount} ${parsed.currency}` : '-';
+                sumCurrency.textContent = parsed.currency || '-';
+
+                summaryCard.style.display = 'block';
+
+                // 假設後端回傳了 GCS 路徑（或你自己組）
+                currentInvoicePath = data.gcsPath || `gs://claimcore/${file.name}`;
+                
+                // 啟用「自動報帳」按鈕
+                autoReimbursementBtn.disabled = false;
+                appendMessage('bot', '💡 點擊「自動報帳」按鈕，AI 會幫你登入系統並完成報帳流程。');
+
+            } catch (err) {
+                console.error(err);
+                setStatus(err.message, false);
+                appendMessage('bot', `❌ ${err.message}`);
+            } finally {
+                uploadBtn.disabled = false;
+            }
+        });
+
+        // 自動報帳（新功能）
+        autoReimbursementBtn.addEventListener('click', async () => {
+            if (!currentInvoicePath) {
+                appendMessage('bot', '❌ 請先上傳並解析發票');
+                return;
+            }
+
+            autoReimbursementBtn.disabled = true;
+            setStatus('🤖 AI 正在自動報帳中，請稍候...');
+            appendMessage('bot', '🤖 正在啟動自動報帳流程...<br>AI 將自動登入淡江系統並填寫報帳單。');
+
+            try {
+                // 呼叫 n8n Webhook
+                const resp = await fetch('https://claimcore-384115959752.asia-east1.run.app', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        invoice_pdf_path: currentInvoicePath
+                    })
+                });
+
+                const data = await resp.json();
+
+                if (!resp.ok) {
+                    throw new Error(`HTTP ${resp.status}`);
+                }
+
+                // 顯示結果
+                setStatus('✅ 自動報帳完成', true);
+                appendMessage('bot', '✅ 自動報帳流程已完成！<br>AI 已成功登入系統並走到報帳頁面。');
+
+                // 顯示 Browser Use 結果
+                browserResultContent.innerHTML = `
+                    <p><strong>任務狀態：</strong>${data.success ? '✅ 成功' : '❌ 失敗'}</p>
+                    <p><strong>執行摘要：</strong>${data.output || data.result || '無詳細資訊'}</p>
+                    <p><strong>任務 ID：</strong>${data.task_id || '-'}</p>
+                `;
+                browserResultCard.style.display = 'block';
+
+            } catch (err) {
+                console.error(err);
+                setStatus('❌ 自動報帳失敗', false);
+                appendMessage('bot', `❌ 自動報帳失敗：${err.message}`);
+            } finally {
+                autoReimbursementBtn.disabled = false;
+            }
+        });
+
+        // 聊天功能（保留原有）
+        sendBtn.addEventListener('click', async () => {
+            const text = userInput.value.trim();
+            if (!text) return;
+            appendMessage('user', text);
+            userInput.value = '';
+            // 這裡可以接你原本的 chat-invoice API
+            // 或暫時只顯示一個回應
+            appendMessage('bot', '💬 聊天功能開發中...');
+        });
+
+        // Enter 鍵發送
+        userInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendBtn.click();
+            }
+        });
+    </script>
+</body>
+</html>
