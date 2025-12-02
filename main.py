@@ -38,49 +38,33 @@ def download_gcs_file(gs_path: str) -> str:
 
 
 def parse_invoice_from_image(gs_path: str) -> dict:
+    # 先依副檔名判斷
+    lower = gs_path.lower()
+    if lower.endswith(".pdf"):
+        # 目前不嘗試用 Pillow 開 PDF，避免 UnidentifiedImageError
+        # 先只回傳路徑，之後可以改成呼叫 Gemini 做 PDF 解析
+        return {
+            "raw_text": None,
+            "items": [],
+            "note": "PDF file detected; QR decoding is skipped in this version.",
+            "source": gs_path
+        }
+
+    # 其餘視為圖片，照舊用 Pillow + pyzbar 解 QR
     local_path = download_gcs_file(gs_path)
     img = Image.open(local_path)
-    codes = decode_qr(img)  # 回傳一個 list，裡面是各個 QRCode 資訊 [web:69][web:70]
 
+    codes = decode_qr(img)
     if not codes:
-        return {"raw_text": None, "items": []}
+        return {"raw_text": None, "items": [], "source": gs_path}
 
-    data = codes[0].data.decode("utf-8")  # 先拿第一個 QRCode
-    # 這裡先不解析台灣電子發票格式，只先把原始字串放進去
+    data = codes[0].data.decode("utf-8")
     return {
         "raw_text": data,
         "items": [],
+        "source": gs_path
     }
 
-
-
-@app.route("/run-workflow", methods=["POST"])
-def run_workflow():
-    body = request.get_json(force=True)
-    workflow_name = body.get("workflow")
-    task = body.get("task", {})
-
-    if not workflow_name:
-        return jsonify({"error": "workflow is required"}), 400
-
-    wf = load_workflow(workflow_name)
-    context = {"task": task}
-
-    for step in wf.get("steps", []):
-        if step["id"] == "parse_invoice_input":
-            gs_path = task.get("invoice_image_path")
-            if gs_path:
-                invoice = parse_invoice_from_image(gs_path)
-                context["invoice"] = invoice
-
-    step_ids = [s["id"] for s in wf.get("steps", [])]
-
-    return jsonify({
-        "workflow": workflow_name,
-        "steps": step_ids,
-        "task": task,
-        "invoice": context.get("invoice")
-    })
 
 
 
