@@ -6,6 +6,8 @@ from google.cloud import storage
 from PIL import Image
 from pyzbar.pyzbar import decode as decode_qr
 import tempfile
+from pypdf import PdfReader
+
 
 app = Flask(__name__)
 
@@ -34,19 +36,34 @@ def download_gcs_file(gs_path: str) -> str:
     blob.download_to_filename(tmp_path)
     return tmp_path
 
+def parse_invoice_from_pdf(gs_path: str) -> dict:
+    # 下載 PDF 檔到暫存路徑
+    local_path = download_gcs_file(gs_path)
+
+    reader = PdfReader(local_path)
+    texts = []
+    for page in reader.pages:
+        # 抽出每一頁文字並累加
+        txt = page.extract_text() or ""
+        texts.append(txt)
+
+    full_text = "\n".join(texts)
+
+    # 這裡先不做欄位拆解，只回傳原始文字
+    return {
+        "raw_text": full_text,
+        "items": [],
+        "source": gs_path,
+        "note": "PDF text extracted; next step is to parse fields from raw_text."
+    }
+
 
 def parse_invoice_from_image(gs_path: str) -> dict:
-    # 先依副檔名判斷
     lower = gs_path.lower()
+
+    # 如果是 PDF，改走文字抽取流程
     if lower.endswith(".pdf"):
-        # 目前不嘗試用 Pillow 開 PDF，避免 UnidentifiedImageError
-        # 先只回傳路徑，之後可以改成呼叫 Gemini 做 PDF 解析
-        return {
-            "raw_text": None,
-            "items": [],
-            "note": "PDF file detected; QR decoding is skipped in this version.",
-            "source": gs_path
-        }
+        return parse_invoice_from_pdf(gs_path)
 
     # 其餘視為圖片，照舊用 Pillow + pyzbar 解 QR
     local_path = download_gcs_file(gs_path)
@@ -62,6 +79,7 @@ def parse_invoice_from_image(gs_path: str) -> dict:
         "items": [],
         "source": gs_path
     }
+
 
 
 @app.route("/run-workflow", methods=["POST"])
