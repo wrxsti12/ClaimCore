@@ -6,6 +6,8 @@ from google.cloud import storage
 from PIL import Image
 from pyzbar.pyzbar import decode as decode_qr
 import tempfile
+import os
+
 
 
 app = Flask(__name__)
