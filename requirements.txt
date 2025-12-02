@@ -1,0 +1,4 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+playwright==1.49.0
+google-cloud-storage==2.18.0

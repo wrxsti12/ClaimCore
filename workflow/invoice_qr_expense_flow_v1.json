@@ -1,0 +1,50 @@
+{
+  "name": "invoice_qr_expense_flow_v1",
+  "description": "從發票圖片/PDF 建立單筆報帳的示範流程",
+  "version": "1.0.0",
+  "steps": [
+    {
+      "id": "parse_invoice_input",
+      "type": "ai",
+      "action": "parse_invoice",
+      "params": {
+        "sources": {
+          "qr_image": "{{task.invoice_image_path}}",
+          "pdf": "{{task.invoice_pdf_path}}"
+        },
+        "outputVar": "invoice"
+      }
+    },
+    {
+      "id": "login",
+      "type": "browser",
+      "action": "login",
+      "params": {
+        "url": "https://example-erp.com/login",
+        "usernameSelector": "#username",
+        "passwordSelector": "#password",
+        "submitSelector": "button[type=submit]",
+        "useCredentialFromTask": true
+      }
+    },
+    {
+      "id": "goto_expense_create",
+      "type": "browser",
+      "action": "navigate_menu",
+      "params": {
+        "menuPath": [
+          "費用報銷",
+          "新增報銷單"
+        ]
+      }
+    },
+    {
+      "id": "finish",
+      "type": "system",
+      "action": "complete_task",
+      "params": {
+        "status": "SUCCESS"
+      }
+    }
+  ]
+}
