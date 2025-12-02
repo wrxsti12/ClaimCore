@@ -3,3 +3,4 @@ playwright==1.49.0
 google-cloud-storage==2.18.0
 Pillow==10.4.0
 pyzbar==0.1.9
+pypdf==4.3.1
