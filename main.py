@@ -81,6 +81,28 @@ def parse_invoice_from_image(gs_path: str) -> dict:
     }
 
 
+@app.route("/parse-invoice", methods=["POST"])
+def parse_invoice():
+    body = request.get_json(force=True)
+    gs_path = body.get("invoice_pdf_path")
+    if not gs_path:
+        return jsonify({"error": "invoice_pdf_path is required"}), 400
+
+    invoice = parse_invoice_from_image(gs_path)
+
+    parsed_fields = {
+        "invoice_number": None,
+        "invoice_date": None,
+        "vendor_name": None,
+        "total_amount": None,
+        "currency": None,
+        "raw_text": invoice.get("raw_text"),
+    }
+
+    return jsonify({
+        "source": gs_path,
+        "parsed_fields": parsed_fields
+    })
 
 @app.route("/run-workflow", methods=["POST"])
 def run_workflow():
