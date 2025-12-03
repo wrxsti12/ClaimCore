@@ -8,6 +8,11 @@ from pyzbar.pyzbar import decode as decode_qr
 import tempfile
 from pypdf import PdfReader
 from browser_use_sdk import BrowserUse
+import requests
+import time
+
+EXCHANGE_RATE_API_KEY = "ec45f233b18cc9fd1a31c2c8"
+EXCHANGE_RATE_API_URL = "https://v6.exchangerate-api.com/v6"
 
 app = Flask(__name__)
 
@@ -29,7 +34,6 @@ def load_workflow(name: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-
 def download_gcs_file(gs_path: str) -> str:
     """從 GCS 下載檔案到暫存目錄"""
     assert gs_path.startswith("gs://"), "路徑必須以 gs:// 開頭"
@@ -44,7 +48,6 @@ def download_gcs_file(gs_path: str) -> str:
     os.close(tmp_fd)
     blob.download_to_filename(tmp_path)
     return tmp_path
-
 
 def parse_invoice_from_pdf(gs_path: str) -> dict:
     """從 PDF 抽取文字"""
@@ -64,12 +67,39 @@ def parse_invoice_from_pdf(gs_path: str) -> dict:
         "note": "PDF text extracted; next step is to parse fields from raw_text."
     }
 
+@app.route("/upload-invoice", methods=["POST"])
+def upload_invoice():
+    """
+    接收前端上傳的檔案，存到 GCS，回傳 gs:// 路徑。
+    前端要用 form-data，上傳欄位名稱為 file。
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "no file part"}), 400
+
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "empty filename"}), 400
+
+    bucket_name = "claimcore"
+
+    try:
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+
+        blob_name = f"invoices/{int(time.time())}_{file.filename}"
+        blob = bucket.blob(blob_name)
+
+        blob.upload_from_file(file.stream, content_type=file.content_type)
+
+        gs_path = f"gs://{bucket_name}/{blob_name}"
+        return jsonify({"gs_path": gs_path})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 def parse_invoice_from_image(gs_path: str) -> dict:
     """從圖片或 PDF 抽取發票資訊"""
     lower = gs_path.lower()
 
-    # 如果是 PDF，走文字抽取
     if lower.endswith(".pdf"):
         return parse_invoice_from_pdf(gs_path)
 
@@ -88,6 +118,21 @@ def parse_invoice_from_image(gs_path: str) -> dict:
         "source": gs_path
     }
 
+# ==================== 匯率工具 ====================
+
+def get_usd_twd_rate_simulated():
+    url = f"{EXCHANGE_RATE_API_URL}/{EXCHANGE_RATE_API_KEY}/latest/USD"
+    print("DEBUG FX URL:", url)
+
+    resp = requests.get(url, timeout=5)
+    print("DEBUG FX STATUS:", resp.status_code)
+    print("DEBUG FX BODY:", resp.text[:200])
+
+    data = resp.json()
+    rates = data.get("conversion_rates", {})
+    twd_rate = rates.get("TWD")
+    rate_date_utc = data.get("time_last_update_utc")
+    return twd_rate, rate_date_utc
 
 # ==================== API Endpoints ====================
 
@@ -106,29 +151,10 @@ def home():
         "n8n_webhook": N8N_WEBHOOK_URL
     })
 
-
 @app.route("/parse-invoice", methods=["POST"])
 def parse_invoice():
     """
-    解析發票 PDF
-
-    Request Body:
-    {
-        "invoice_pdf_path": "gs://claimcore/invoice.pdf"
-    }
-
-    Response:
-    {
-        "source": "gs://claimcore/invoice.pdf",
-        "parsed_fields": {
-            "invoice_number": "...",
-            "invoice_date": "...",
-            "vendor_name": "...",
-            "total_amount": 21.0,
-            "currency": "USD",
-            "raw_text": "發票完整文字內容..."
-        }
-    }
+    解析發票 PDF；若為 USD 發票則模擬匯率計算折合台幣。
     """
     body = request.get_json(force=True)
     gs_path = body.get("invoice_pdf_path")
@@ -137,36 +163,70 @@ def parse_invoice():
         return jsonify({"error": "invoice_pdf_path is required"}), 400
 
     try:
-        # 先從圖片 / PDF 解析出文字
         invoice = parse_invoice_from_image(gs_path)
-        raw = invoice.get("raw_text", "")
+        raw = invoice.get("raw_text", "") or ""
 
         # 粗略欄位解析
         invoice_number = None
         invoice_date = None
         total_amount = None
-        currency = "USD"
+        currency = None  # 先不預設，後面再判斷
 
         for line in raw.splitlines():
             if "Invoice\t#:" in line or "Invoice #:" in line:
                 invoice_number = line.split(":")[-1].strip()
+
             if "Invoice\tdate:" in line or "Invoice date:" in line:
                 invoice_date = line.split(":")[-1].strip()
-            if "Total" in line and "USD" in line:
+
+            # 金額行：同時處理英文 Total 和中文 總計 / 發票總金額
+            if ("Total" in line) or ("總計" in line) or ("發票總金額" in line):
                 parts = line.split()
+
+                # 嘗試從這一行判斷幣別
+                if "USD" in parts:
+                    currency = "USD"
+                elif ("TWD" in parts) or ("NT$" in parts) or ("NTD" in parts) or ("幣別:TWD" in line):
+                    currency = "TWD"
+
+                # 從右往左找最後一個像數字的 token 當金額
                 for token in reversed(parts):
                     try:
-                        total_amount = float(token)
+                        total_amount = float(token.replace(",", ""))
                         break
                     except ValueError:
                         continue
 
+        # 若仍未判斷出幣別，先預設為 TWD（本幣）
+        if currency is None:
+            currency = "TWD"
+
+        # 嘗試從全文辨識供應商
+        vendor_name = "未知供應商"
+        lower_text = raw.lower()
+        if "adobe systems software ireland limited" in lower_text:
+            vendor_name = "Adobe Systems Software Ireland Limited"
+        elif "openai, llc" in lower_text:
+            vendor_name = "OpenAI, LLC"
+
+        fx_rate = None
+        fx_rate_date = None
+        amount_twd = None
+
+        if currency == "USD" and total_amount is not None:
+            fx_rate, fx_rate_date = get_usd_twd_rate_simulated()
+            if fx_rate is not None:
+                amount_twd = total_amount * fx_rate
+
         parsed_fields = {
             "invoice_number": invoice_number,
             "invoice_date": invoice_date,
-            "vendor_name": "OpenAI, LLC",
+            "vendor_name": vendor_name,
             "total_amount": total_amount,
             "currency": currency,
+            "fx_rate": fx_rate,
+            "fx_rate_date": fx_rate_date,
+            "amount_twd": amount_twd,
             "raw_text": raw,
         }
 
@@ -177,63 +237,47 @@ def parse_invoice():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
-
 @app.route("/run-browser-task", methods=["POST"])
 def run_browser_task():
     """
     執行 Browser Use 自動化任務
-    
-    Request Body:
-    {
-        "task": "Open https://example.com and do something..."
-    }
-    
-    Response:
-    {
-        "success": true,
-        "task_id": "xxx-xxx-xxx",
-        "status": "completed",
-        "output": "任務執行結果描述",
-        "result": "完整的執行細節..."
-    }
     """
     body = request.get_json(force=True)
     task_description = body.get("task")
-    
+
     if not task_description:
         return jsonify({"error": "task is required"}), 400
-    
+
+    # Debug：確認 Cloud Run 讀到的 API key 前幾碼
+    print("DEBUG BROWSER_USE_API_KEY prefix:",
+          os.environ.get("BROWSER_USE_API_KEY", "")[:10])
+
     api_key = os.environ.get("BROWSER_USE_API_KEY")
     if not api_key:
         return jsonify({"error": "BROWSER_USE_API_KEY not set"}), 500
-    
+
     try:
-        # 初始化 Browser Use client
         client = BrowserUse(api_key=api_key)
-        
-        # 建立並執行任務
+
         task = client.tasks.create_task(
             task=task_description,
-            llm="browser-use-llm"
+            llm="browser-use-llm",
         )
-        
-        # 等待任務完成
+
         result = task.complete()
-        
-        # 回傳結果
+
         return jsonify({
             "success": True,
-            "task_id": getattr(result, 'id', None),
+            "task_id": getattr(result, "id", None),
             "status": "completed",
-            "output": getattr(result, 'output', str(result)),
-            "result": str(result)
+            "output": getattr(result, "output", str(result)),
+            "result": str(result),
         })
     except Exception as e:
         return jsonify({
             "success": False,
             "error": str(e),
-            "error_type": type(e).__name__
+            "error_type": type(e).__name__,
         }), 500
 
 
@@ -241,14 +285,6 @@ def run_browser_task():
 def run_workflow():
     """
     執行完整的 workflow（保留原有功能）
-    
-    Request Body:
-    {
-        "workflow": "workflow_name",
-        "task": {
-            "invoice_image_path": "gs://..."
-        }
-    }
     """
     body = request.get_json(force=True)
     workflow_name = body.get("workflow")
@@ -261,7 +297,6 @@ def run_workflow():
         wf = load_workflow(workflow_name)
         context = {"task": task}
 
-        # 簡化版：只處理 parse_invoice_input
         for step in wf.get("steps", []):
             if step["id"] == "parse_invoice_input":
                 gs_path = task.get("invoice_image_path")
@@ -280,7 +315,6 @@ def run_workflow():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 # ==================== CORS 支援（前端需要） ====================
 
 @app.after_request
@@ -290,7 +324,6 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
-
 
 # ==================== 啟動服務 ====================
 

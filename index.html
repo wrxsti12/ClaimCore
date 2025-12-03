@@ -55,6 +55,8 @@
                     <tr><th>供應商</th><td id="sumSeller"></td></tr>
                     <tr><th>金額</th><td id="sumTotal"></td></tr>
                     <tr><th>幣別</th><td id="sumCurrency"></td></tr>
+                    <tr><th>匯率</th><td id="sumFxRate"></td></tr>
+                    <tr><th>折合台幣</th><td id="sumTwd"></td></tr>
                 </tbody>
             </table>
         </section>
@@ -67,7 +69,7 @@
     </div>
 
     <script>
-        // DOM 元素
+        // ===== DOM 元素 =====
         const uploadBtn = document.getElementById('uploadBtn');
         const autoReimbursementBtn = document.getElementById('autoReimbursementBtn');
         const fileInput = document.getElementById('fileInput');
@@ -85,28 +87,39 @@
         const sumSeller = document.getElementById('sumSeller');
         const sumTotal = document.getElementById('sumTotal');
         const sumCurrency = document.getElementById('sumCurrency');
+        const sumFxRate = document.getElementById('sumFxRate');
+        const sumTwd = document.getElementById('sumTwd');
 
-        let currentInvoicePath = null; // 儲存目前上傳的發票 GCS 路徑
+        let currentInvoicePath = null; // 儲存目前使用的發票 GCS 路徑
 
-        // 設定狀態訊息
+        // ===== 共用函式 =====
         function setStatus(msg, ok = true) {
             statusMessage.textContent = msg;
             statusMessage.className = `status-bar ${ok ? 'ok' : 'err'}`;
         }
 
-        // 新增聊天訊息
         function appendMessage(role, text) {
             const wrapper = document.createElement('div');
             wrapper.className = `message ${role === 'user' ? 'user' : 'bot'}`;
             const bubble = document.createElement('div');
             bubble.className = 'message-bubble';
-            bubble.innerHTML = text; // 使用 innerHTML 支援換行
+            bubble.innerHTML = text;
             wrapper.appendChild(bubble);
             chatMessages.appendChild(wrapper);
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
 
-        // 解析發票（原有功能）
+        // 從 Response 安全取得 JSON（避免 HTML 錯誤頁）
+        async function safeJson(resp) {
+            const text = await resp.text();
+            try {
+                return JSON.parse(text);
+            } catch (e) {
+                throw new Error(`後端回傳的不是 JSON（HTTP ${resp.status}）`);
+            }
+        }
+
+        // ===== 上傳 + 解析發票 =====
         uploadBtn.addEventListener('click', async () => {
             const file = fileInput.files[0];
             if (!file) {
@@ -114,48 +127,78 @@
                 return;
             }
 
-            const formData = new FormData();
-            formData.append('file', file);
             uploadBtn.disabled = true;
-            setStatus('上傳中...');
+            setStatus('上傳並解析中...');
             appendMessage('user', `📎 ${file.name}`);
 
             try {
-                // 假設你原本的後端是 http://127.0.0.1:8000/parse-invoice
-                // 改成你實際的後端 URL
-                const resp = await fetch('https://claimcore-384115959752.asia-east1.run.app', {
+                // 1. 上傳到 /upload-invoice
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const uploadResp = await fetch('https://claimcore-384115959752.asia-east1.run.app/upload-invoice', {
                     method: 'POST',
                     body: formData
                 });
-                const data = await resp.json();
 
-                if (!resp.ok || !data.success) {
+                const uploadData = await safeJson(uploadResp);
+                if (!uploadResp.ok || uploadData.error) {
+                    const errMsg = uploadData.error || `上傳失敗 (HTTP ${uploadResp.status})`;
+                    setStatus(errMsg, false);
+                    appendMessage('bot', `❌ ${errMsg}`);
+                    return;
+                }
+
+                const invoicePath = uploadData.gs_path;  // 真正的 gs:// 路徑
+
+                // 2. 呼叫 /parse-invoice
+                const resp = await fetch('https://claimcore-384115959752.asia-east1.run.app/parse-invoice', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ invoice_pdf_path: invoicePath })
+                });
+
+                const data = await safeJson(resp);
+
+                if (!resp.ok || data.error) {
                     const errMsg = data.error || `HTTP ${resp.status}`;
                     setStatus(errMsg, false);
                     appendMessage('bot', `❌ ${errMsg}`);
                     return;
                 }
 
-                const parsed = data.parsed;
-                setStatus('✅ 解析成功');
-                appendMessage('bot', `✅ 發票已解析完成！`);
+                const parsed = data.parsed_fields || {};
 
-                // 填充摘要表格
-                sumInvoiceNo.textContent = parsed.invoiceNo || '-';
-                sumDate.textContent = parsed.date || '-';
-                sumSeller.textContent = parsed.sellerName || '-';
-                sumTotal.textContent = parsed.totalAmount !== null ? `${parsed.totalAmount} ${parsed.currency}` : '-';
+                setStatus('✅ 解析成功');
+                appendMessage('bot', '✅ 發票已解析完成！');
+
+                // 基本欄位
+                sumInvoiceNo.textContent = parsed.invoice_number || '-';
+                sumDate.textContent = parsed.invoice_date || '-';
+                sumSeller.textContent = parsed.vendor_name || '-';
+
+                if (parsed.total_amount != null) {
+                    sumTotal.textContent = `${parsed.total_amount} ${parsed.currency || ''}`.trim();
+                } else {
+                    sumTotal.textContent = '-';
+                }
                 sumCurrency.textContent = parsed.currency || '-';
+
+                // 匯率與折合台幣（只對 USD 顯示）
+                if (parsed.currency === 'USD' && parsed.fx_rate && parsed.amount_twd != null) {
+                    sumFxRate.textContent = `1 USD = ${parsed.fx_rate.toFixed(4)} TWD`;
+                    sumTwd.textContent = `${parsed.amount_twd.toFixed(2)} TWD`;
+                } else {
+                    sumFxRate.textContent = '-';
+                    sumTwd.textContent = '-';
+                }
 
                 summaryCard.style.display = 'block';
 
-                // 假設後端回傳了 GCS 路徑（或你自己組）
-                currentInvoicePath = data.gcsPath || `gs://claimcore/${file.name}`;
-                
-                // 啟用「自動報帳」按鈕
+                // 記錄當前發票路徑，讓「自動報帳」用
+                currentInvoicePath = data.source || invoicePath;
                 autoReimbursementBtn.disabled = false;
                 appendMessage('bot', '💡 點擊「自動報帳」按鈕，AI 會幫你登入系統並完成報帳流程。');
-
             } catch (err) {
                 console.error(err);
                 setStatus(err.message, false);
@@ -165,7 +208,7 @@
             }
         });
 
-        // 自動報帳（新功能）
+        // ===== 自動報帳（呼叫 n8n Webhook）=====
         autoReimbursementBtn.addEventListener('click', async () => {
             if (!currentInvoicePath) {
                 appendMessage('bot', '❌ 請先上傳並解析發票');
@@ -177,8 +220,7 @@
             appendMessage('bot', '🤖 正在啟動自動報帳流程...<br>AI 將自動登入淡江系統並填寫報帳單。');
 
             try {
-                // 呼叫 n8n Webhook
-                const resp = await fetch('https://claimcore-384115959752.asia-east1.run.app', {
+                const resp = await fetch('https://pinhua12.app.n8n.cloud/webhook/Claimcore', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -186,24 +228,21 @@
                     })
                 });
 
-                const data = await resp.json();
+                const data = await safeJson(resp);
 
                 if (!resp.ok) {
-                    throw new Error(`HTTP ${resp.status}`);
+                    throw new Error(data.error || `HTTP ${resp.status}`);
                 }
 
-                // 顯示結果
                 setStatus('✅ 自動報帳完成', true);
                 appendMessage('bot', '✅ 自動報帳流程已完成！<br>AI 已成功登入系統並走到報帳頁面。');
 
-                // 顯示 Browser Use 結果
                 browserResultContent.innerHTML = `
-                    <p><strong>任務狀態：</strong>${data.success ? '✅ 成功' : '❌ 失敗'}</p>
-                    <p><strong>執行摘要：</strong>${data.output || data.result || '無詳細資訊'}</p>
-                    <p><strong>任務 ID：</strong>${data.task_id || '-'}</p>
+                    <p><strong>任務狀態：</strong>${data.success === false ? '❌ 失敗' : '✅ 成功'}</p>
+                    <p><strong>執行摘要：</strong>${data.output || (data.result && data.result.output) || '無詳細資訊'}</p>
+                    <p><strong>任務 ID：</strong>${data.task_id || (data.result && data.result.task_id) || '-'}</p>
                 `;
                 browserResultCard.style.display = 'block';
-
             } catch (err) {
                 console.error(err);
                 setStatus('❌ 自動報帳失敗', false);
@@ -213,18 +252,15 @@
             }
         });
 
-        // 聊天功能（保留原有）
-        sendBtn.addEventListener('click', async () => {
+        // ===== 簡單聊天 =====
+        sendBtn.addEventListener('click', () => {
             const text = userInput.value.trim();
             if (!text) return;
             appendMessage('user', text);
             userInput.value = '';
-            // 這裡可以接你原本的 chat-invoice API
-            // 或暫時只顯示一個回應
             appendMessage('bot', '💬 聊天功能開發中...');
         });
 
-        // Enter 鍵發送
         userInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
